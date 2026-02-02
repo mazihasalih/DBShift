@@ -1,0 +1,113 @@
+CREATE OR REPLACE PROCEDURE gaming_warehouse.usp_Player360_WithLoop(
+    MinAmntBet NUMBER(18,2) DEFAULT 500,
+    RiskLevel STRING DEFAULT NULL,
+    LocationKeyword STRING DEFAULT NULL
+)
+RETURNS TABLE (
+    PlayerId NUMBER,
+    PlayerTier STRING,
+    EngagementScore FLOAT,
+    Risk_Category STRING,
+    NameHasDigits BOOLEAN,
+    LocContainsKeyword BOOLEAN,
+    AgeInt NUMBER,
+    PlayerRank NUMBER
+)
+LANGUAGE SQL
+AS
+$$
+DECLARE
+    MaxRow NUMBER;
+    CurrentRow NUMBER DEFAULT 1;
+    PlayerId NUMBER;
+    FirstName STRING;
+    Location STRING;
+    AmntBet NUMBER(18,2);
+    Total_No_Games NUMBER;
+    Time_Spent NUMBER;
+    Value_Of_Promotions_Used NUMBER(18,2);
+    Visit_Frequency_Days NUMBER;
+    Risk_Category STRING;
+    Age STRING;
+    EngagementScore FLOAT;
+    NameHasDigits BOOLEAN;
+    LocContainsKeyword BOOLEAN;
+    AgeInt NUMBER;
+    PlayerTier STRING;
+    res RESULTSET;
+    cur CURSOR FOR 
+        SELECT 
+            PlayerId,
+            FirstName,
+            Location,
+            AmntBet,
+            Total_No_Games,
+            Time_Spent,
+            Value_Of_Promotions_Used,
+            Visit_Frequency_Days,
+            Risk_Category,
+            Age
+        FROM dbo.Player_360_Summary
+        WHERE AmntBet >= MinAmntBet
+          AND (RiskLevel IS NULL OR Risk_Category = RiskLevel)
+          AND (LocationKeyword IS NULL OR POSITION(LOWER(LocationKeyword) IN LOWER(Location)) > 0);
+BEGIN
+    CREATE TEMPORARY TABLE TempResult (
+        PlayerId NUMBER,
+        PlayerTier STRING,
+        EngagementScore FLOAT,
+        Risk_Category STRING,
+        NameHasDigits BOOLEAN,
+        LocContainsKeyword BOOLEAN,
+        AgeInt NUMBER
+    );
+
+    OPEN cur;
+    FETCH cur INTO PlayerId, FirstName, Location, AmntBet, Total_No_Games, Time_Spent, Value_Of_Promotions_Used, Visit_Frequency_Days, Risk_Category, Age;
+
+    WHILE (PlayerId IS NOT NULL) DO
+        LET EngagementScore := COALESCE(Total_No_Games,0)*0.3 
+                             + COALESCE(Time_Spent,0)*0.4 
+                             + COALESCE(Value_Of_Promotions_Used,0)*0.2 
+                             - COALESCE(Visit_Frequency_Days,0)*0.1;
+
+        LET NameHasDigits := REGEXP_LIKE(FirstName, '[0-9]');
+
+        LET LocContainsKeyword := CASE 
+            WHEN LocationKeyword IS NOT NULL AND POSITION(LOWER(LocationKeyword) IN LOWER(COALESCE(Location,''))) > 0 THEN TRUE 
+            ELSE FALSE 
+        END;
+
+        LET AgeInt := TRY_CAST(Age AS INTEGER);
+
+        LET PlayerTier := CASE 
+            WHEN EngagementScore >= 80 AND COALESCE(Visit_Frequency_Days, 999) <= 5 AND NOT NameHasDigits AND AgeInt BETWEEN 25 AND 45 THEN 'Gold'
+            WHEN EngagementScore >= 50 AND COALESCE(Visit_Frequency_Days, 999) <= 10 AND LocContainsKeyword THEN 'Silver'
+            WHEN EngagementScore >= 30 AND COALESCE(AgeInt, 0) < 25 THEN 'Bronze'
+            ELSE 'Newbie'
+        END;
+
+        INSERT INTO TempResult
+        VALUES (PlayerId, PlayerTier, EngagementScore, Risk_Category, NameHasDigits, LocContainsKeyword, AgeInt);
+
+        FETCH cur INTO PlayerId, FirstName, Location, AmntBet, Total_No_Games, Time_Spent, Value_Of_Promotions_Used, Visit_Frequency_Days, Risk_Category, Age;
+    END WHILE;
+
+    CLOSE cur;
+
+    res := (SELECT 
+        PlayerId,
+        PlayerTier,
+        EngagementScore,
+        Risk_Category,
+        NameHasDigits,
+        LocContainsKeyword,
+        AgeInt,
+        RANK() OVER (ORDER BY EngagementScore DESC, PlayerId) AS PlayerRank
+    FROM TempResult
+    ORDER BY PlayerRank, PlayerTier DESC, EngagementScore DESC);
+
+    RETURN TABLE(res);
+END;
+$$;
+--End_DBShift
